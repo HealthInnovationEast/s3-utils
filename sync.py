@@ -5,8 +5,12 @@ import fire
 import configparser
 from typing import Any
 from typing import Dict
-# from pprint import pprint
+from pprint import pprint
 import logging
+import math
+import sys
+
+MB = 1024*1024
 
 logging.basicConfig(level=getattr(logging, "INFO"))
 
@@ -38,7 +42,7 @@ def extract_bucket(s3_path:str):
     return (bucket, prefix)
 
 
-def list_s3(clients, location:str, url:str):
+def list_s3(clients, location:str, url:str, allow_multipart:bool):
     bucket, prefix = extract_bucket(url)
     s3 = clients[location]
     s3_set = {}
@@ -46,10 +50,24 @@ def list_s3(clients, location:str, url:str):
     while True:
         for f in bkt_resp["Contents"]:
             if f["Key"].endswith("/"): continue
-            if f["Key"].endswith("md5") is False:
-                logging.warning(f"only keeping md5, skipping: {f['Key']}")
-                continue
-            s3_set[f["Key"]] = f["ETag"]
+
+            attr_resp = s3.get_object_attributes(
+                Bucket=bucket,
+                Key=f["Key"],
+                ObjectAttributes=['ObjectParts','ObjectSize']
+            )
+
+            part_size = None
+            if "ObjectParts" in attr_resp:
+                # ceil then rescale back to bytes
+                part_size = math.ceil(attr_resp["ObjectSize"] / attr_resp["ObjectParts"]["TotalPartsCount"] / MB) * MB
+
+            if part_size is not None:
+                if allow_multipart == False:
+                    logging.warning(f"Multipart, skipping: {f['Key']} (see --help)")
+                    continue
+
+            s3_set[f["Key"]] = {"ETag": f["ETag"], "PartSize" : part_size}
         if bkt_resp["IsTruncated"] is False:
             break
         else:
@@ -71,7 +89,11 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
     bucket, prefix = extract_bucket(dest_url)
     source_client = clients["FROM"]
     dest_client = clients["TO"]
-    for src, chk in src_objects.items():
+    for src, src_obj in src_objects.items():
+        # dict content to vars
+        chk = src_obj["ETag"]
+        part_size = src_obj["PartSize"]
+
         target = src.replace(src_prefix, prefix)
         target_obj = obj_info(dest_client, bucket, target)
         if target_obj is not None:
@@ -84,14 +106,44 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
         source_client.download_file(src_bkt, src, 'sync_tmp_file')
         # upload the file
         logging.info(f"Uploading: {target}")
-        dest_client.upload_file('sync_tmp_file', bucket, target)
+
+        trans_conf = None
+        if part_size is not None:
+            trans_conf = boto3.s3.transfer.TransferConfig(
+                multipart_threshold=part_size,
+                multipart_chunksize=part_size,
+                max_concurrency=10,
+                use_threads=True
+            )
+        dest_client.upload_file('sync_tmp_file', bucket, target, Config=trans_conf)
 
 
 
 
-def run(config, source_s3, dest_s3):
+def run(config, source_s3, dest_s3, allow_multipart=False):
+    """
+    Used to synchronise data between buckets from different AWS accounts.
+    !! Do not use outside of AWS on large data, egress charges !!
+
+    Positional arguments:
+
+        CONFIG:
+            AWS account details for source (FROM) and destination (TO)
+            accounts, see example demo.conf
+
+        SOURCE_S3:
+            The Bucket path to replicate, this can point to a sub-path within a bucket.
+            Must include 's3://' prefix.
+
+        DEST_S3
+            The Bucket path to deposit data at, this can point to a sub-path within a bucket.
+            Must include 's3://' prefix.
+
+    It is possible to use this to transfer data within an account, however be concious that it will not delete data
+    so storage costs will apply.
+    """
     clients = load_conf(config)
-    src_bkt, src_prefix, src_objects = list_s3(clients, "FROM", source_s3)
+    src_bkt, src_prefix, src_objects = list_s3(clients, "FROM", source_s3, allow_multipart)
     transfer_objects(clients, src_bkt, src_prefix, src_objects, dest_s3)
 
 if __name__ == '__main__':
