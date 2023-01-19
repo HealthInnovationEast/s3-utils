@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import boto3
+import botocore
 import fire
 import configparser
 from typing import Any
@@ -13,8 +14,13 @@ import os
 
 MB = 1024*1024
 TMP_DL_FILE = '/tmp/sync_tmp_file'
+CPUS = os.cpu_count()
 
 logging.basicConfig(level=getattr(logging, "INFO"))
+
+client_config = botocore.config.Config(
+    max_pool_connections=CPUS,
+)
 
 def get_client(purpose: str, account_sec):
     return boto3.client(
@@ -22,6 +28,7 @@ def get_client(purpose: str, account_sec):
         region_name=account_sec["region"],
         aws_access_key_id=account_sec["access_key"],
         aws_secret_access_key=account_sec["secret_key"],
+        config=client_config
     )
 
 def load_conf(config_file: str) -> Dict[str, Any]:
@@ -96,6 +103,11 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
     if storage_class is not None:
         up_extra_args = {"StorageClass": storage_class}
 
+    dl_t_cfg = boto3.s3.transfer.TransferConfig(
+        max_concurrency=CPUS,
+        use_threads=True
+    )
+
     for src, src_obj in src_objects.items():
         # dict content to vars
         chk = src_obj["ETag"]
@@ -112,7 +124,7 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
         logging.info(f"Downloading: {src}")
         if os.path.exists(TMP_DL_FILE):
             os.remove(TMP_DL_FILE)
-        source_client.download_file(src_bkt, src, TMP_DL_FILE)
+        source_client.download_file(src_bkt, src, TMP_DL_FILE, Config=dl_t_cfg)
         # upload the file
         logging.info(f"Uploading: {target}")
 
@@ -121,10 +133,10 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
             trans_conf = boto3.s3.transfer.TransferConfig(
                 multipart_threshold=part_size,
                 multipart_chunksize=part_size,
-                max_concurrency=10,
+                max_concurrency=CPUS,
                 use_threads=True
             )
-        dest_client.upload_file('sync_tmp_file', bucket, target, ExtraArgs=up_extra_args, Config=trans_conf)
+        dest_client.upload_file(TMP_DL_FILE, bucket, target, ExtraArgs=up_extra_args, Config=trans_conf)
         target_obj = obj_info(dest_client, bucket, target)
         if target_obj["ETag"] != chk:
             issue_list.append(f"ETag mismatch: {src_bkt}/{src} : {bucket}/{target}")
