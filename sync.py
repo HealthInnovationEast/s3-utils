@@ -11,6 +11,7 @@ import logging
 import math
 import sys
 import os
+from datetime import datetime
 
 MB = 1024*1024
 TMP_DL_FILE = '/tmp/sync_tmp_file'
@@ -56,6 +57,7 @@ def list_s3(clients, location:str, url:str, allow_multipart:bool):
     s3 = clients[location]
     s3_set = {}
     bkt_resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+
     while True:
         for f in bkt_resp["Contents"]:
             if f["Key"].endswith("/"): continue
@@ -76,7 +78,7 @@ def list_s3(clients, location:str, url:str, allow_multipart:bool):
                     logging.warning(f"Multipart, skipping: {f['Key']} (see --help)")
                     continue
 
-            s3_set[f["Key"]] = {"ETag": f["ETag"], "PartSize" : part_size}
+            s3_set[f["Key"]] = {"ETag": f["ETag"], "PartSize" : part_size, "ObjectSize": attr_resp["ObjectSize"]}
         if bkt_resp["IsTruncated"] is False:
             break
         else:
@@ -94,7 +96,10 @@ def obj_info(s3, bucket, key):
                 response = obj
     return response
 
-def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_objects:Dict[str,str], dest_url:str, storage_class: Optional[str]):
+def calc_transfer_speed(start:float, end:float, size_bytes):
+    return math.floor((size_bytes / MB) / (end-start))
+
+def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_objects:Dict[str,str], dest_url:str, storage_class: Optional[str], modulus:int, remainder:int):
     issue_list = []
     bucket, prefix = extract_bucket(dest_url)
     source_client = clients["FROM"]
@@ -108,7 +113,13 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
         use_threads=True
     )
 
-    for src, src_obj in src_objects.items():
+    # want consistent order so we can use a modulus
+    obj_counter = 0
+    for src, src_obj in sorted(src_objects.items()):
+        obj_counter += 1
+        if obj_counter % modulus != remainder:
+            logging.info(f"modulo skip: {obj_counter} -> {src}")
+            continue
         # dict content to vars
         chk = src_obj["ETag"]
         part_size = src_obj["PartSize"]
@@ -124,7 +135,12 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
         logging.info(f"Downloading: {src}")
         if os.path.exists(TMP_DL_FILE):
             os.remove(TMP_DL_FILE)
+
+        start = datetime.now().timestamp()
         source_client.download_file(src_bkt, src, TMP_DL_FILE, Config=dl_t_cfg)
+        end = datetime.now().timestamp()
+        logging.info(f"Download MBs/s \t {calc_transfer_speed(start, end, src_obj['ObjectSize'])} <- {src_bkt}/{src}")
+
         # upload the file
         logging.info(f"Uploading: {target}")
 
@@ -136,7 +152,12 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
                 max_concurrency=CPUS,
                 use_threads=True
             )
+
+        start = datetime.now().timestamp()
         dest_client.upload_file(TMP_DL_FILE, bucket, target, ExtraArgs=up_extra_args, Config=trans_conf)
+        end = datetime.now().timestamp()
+        logging.info(f"Upload MBs/s \t {calc_transfer_speed(start, end, src_obj['ObjectSize'])} -> {bucket}/{target}")
+
         target_obj = obj_info(dest_client, bucket, target)
         if target_obj["ETag"] != chk:
             issue_list.append(f"ETag mismatch: {src_bkt}/{src} : {bucket}/{target}")
@@ -147,10 +168,7 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
             print(i, file=sys.stderr)
         sys.exit(1)
 
-
-
-
-def run(config:str, source_s3:str, dest_s3:str, allow_multipart:bool=False, storage_class:Optional[str]=None):
+def run(config:str, source_s3:str, dest_s3:str, allow_multipart:bool=False, storage_class:Optional[str]=None, modulus:int=1, remainder:int=0):
     """
     Used to synchronise data between buckets from different AWS accounts.
     !! Do not use outside of AWS on large data, egress charges !!
@@ -179,14 +197,30 @@ def run(config:str, source_s3:str, dest_s3:str, allow_multipart:bool=False, stor
             STANDARD | REDUCED_REDUNDANCY | STANDARD_IA | ONEZONE_IA | INTELLIGENT_TIERING | GLACIER |
             DEEP_ARCHIVE | GLACIER_IR. Defaults to 'STANDARD'
 
+        modulus
+            ! Use with remainder !
+            Allows you to split workload for frozen source bucket into even sized chunks for parallel processing
+            on different hosts.
+
+            Specify the number of instances you will execute i.e. 4
+
+        remainder
+            ! Use with modulus !
+            Specify a value of 0-(modulus-1) for this invocation of the script.
+
     Other:
 
     It is possible to use this to transfer data within an account, however be concious that it will not delete data
     so storage costs will apply.
     """
+    if remainder < 0 or remainder >= modulus:
+        logging.error(f"Option --remainder ({remainder}) must be less than --modulus ({modulus}) (and >= 0)")
+        sys.exit(1)
+
+
     clients = load_conf(config)
     src_bkt, src_prefix, src_objects = list_s3(clients, "FROM", source_s3, allow_multipart)
-    transfer_objects(clients, src_bkt, src_prefix, src_objects, dest_s3, storage_class)
+    transfer_objects(clients, src_bkt, src_prefix, src_objects, dest_s3, storage_class, modulus, remainder)
 
 if __name__ == '__main__':
   fire.Fire(run)
