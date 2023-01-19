@@ -5,7 +5,7 @@ import fire
 import configparser
 from typing import Any
 from typing import Dict
-from pprint import pprint
+from typing import Optional
 import logging
 import math
 import sys
@@ -85,10 +85,14 @@ def obj_info(s3, bucket, key):
                 response = obj
     return response
 
-def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_objects:Dict[str,str], dest_url:str):
+def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_objects:Dict[str,str], dest_url:str, storage_class: Optional[str]):
+    issue_list = []
     bucket, prefix = extract_bucket(dest_url)
     source_client = clients["FROM"]
     dest_client = clients["TO"]
+    up_extra_args = None
+    if storage_class is not None:
+        up_extra_args = {"StorageClass": storage_class}
     for src, src_obj in src_objects.items():
         # dict content to vars
         chk = src_obj["ETag"]
@@ -115,17 +119,24 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
                 max_concurrency=10,
                 use_threads=True
             )
-        dest_client.upload_file('sync_tmp_file', bucket, target, Config=trans_conf)
+        dest_client.upload_file('sync_tmp_file', bucket, target, ExtraArgs=up_extra_args, Config=trans_conf)
+        target_obj = obj_info(dest_client, bucket, target)
+        if target_obj["ETag"] != chk:
+            issue_list.append(f"ETag mismatch: {src_bkt}/{src} : {bucket}/{target}")
+    if len(issue_list) > 0:
+        for i in issue_list:
+            print(i, file=sys.stderr)
+        sys.exit(1)
 
 
 
 
-def run(config, source_s3, dest_s3, allow_multipart=False):
+def run(config:str, source_s3:str, dest_s3:str, allow_multipart:bool=False, storage_class:Optional[str]=None):
     """
     Used to synchronise data between buckets from different AWS accounts.
     !! Do not use outside of AWS on large data, egress charges !!
 
-    Positional arguments:
+    Positional arguments
 
         CONFIG:
             AWS account details for source (FROM) and destination (TO)
@@ -139,12 +150,24 @@ def run(config, source_s3, dest_s3, allow_multipart=False):
             The Bucket path to deposit data at, this can point to a sub-path within a bucket.
             Must include 's3://' prefix.
 
+    Flags - short/long form detailed at end of help
+
+        allow_multipart
+            When not specified all files over 8 MB are ignored, useful for initial testing
+
+        storage_class
+            When supported allows you to direct files into a particular storage class to reduce costs:
+            STANDARD | REDUCED_REDUNDANCY | STANDARD_IA | ONEZONE_IA | INTELLIGENT_TIERING | GLACIER |
+            DEEP_ARCHIVE | GLACIER_IR. Defaults to 'STANDARD'
+
+    Other:
+
     It is possible to use this to transfer data within an account, however be concious that it will not delete data
     so storage costs will apply.
     """
     clients = load_conf(config)
     src_bkt, src_prefix, src_objects = list_s3(clients, "FROM", source_s3, allow_multipart)
-    transfer_objects(clients, src_bkt, src_prefix, src_objects, dest_s3)
+    transfer_objects(clients, src_bkt, src_prefix, src_objects, dest_s3, storage_class)
 
 if __name__ == '__main__':
   fire.Fire(run)
