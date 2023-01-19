@@ -9,8 +9,10 @@ from typing import Optional
 import logging
 import math
 import sys
+import os
 
 MB = 1024*1024
+TMP_DL_FILE = '/tmp/sync_tmp_file'
 
 logging.basicConfig(level=getattr(logging, "INFO"))
 
@@ -93,6 +95,7 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
     up_extra_args = None
     if storage_class is not None:
         up_extra_args = {"StorageClass": storage_class}
+
     for src, src_obj in src_objects.items():
         # dict content to vars
         chk = src_obj["ETag"]
@@ -107,7 +110,9 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
             logging.warning(f"Redoing as mismatched ETag: {src}")
         # download the file
         logging.info(f"Downloading: {src}")
-        source_client.download_file(src_bkt, src, 'sync_tmp_file')
+        if os.path.exists(TMP_DL_FILE):
+            os.remove(TMP_DL_FILE)
+        source_client.download_file(src_bkt, src, TMP_DL_FILE)
         # upload the file
         logging.info(f"Uploading: {target}")
 
@@ -123,6 +128,8 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
         target_obj = obj_info(dest_client, bucket, target)
         if target_obj["ETag"] != chk:
             issue_list.append(f"ETag mismatch: {src_bkt}/{src} : {bucket}/{target}")
+    if os.path.exists(TMP_DL_FILE):
+        os.remove(TMP_DL_FILE)
     if len(issue_list) > 0:
         for i in issue_list:
             print(i, file=sys.stderr)
