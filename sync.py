@@ -79,6 +79,10 @@ def list_s3(clients, location:str, url:str, allow_multipart:bool):
                     continue
 
             s3_set[f["Key"]] = {"ETag": f["ETag"], "PartSize" : part_size, "ObjectSize": attr_resp["ObjectSize"]}
+
+            if len(s3_set) == 10:
+                break
+
         if bkt_resp["IsTruncated"] is False:
             break
         else:
