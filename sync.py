@@ -17,11 +17,12 @@ MB = 1024*1024
 TMP_DL_FILE = '/tmp/sync_tmp_file'
 CPUS = os.cpu_count()
 
-logging.basicConfig(level=getattr(logging, "INFO"))
-
 client_config = botocore.config.Config(
     max_pool_connections=CPUS,
 )
+
+def log_config(level: str):
+    logging.basicConfig(level=getattr(logging, level))
 
 def get_client(purpose: str, account_sec):
     return boto3.client(
@@ -87,6 +88,7 @@ def list_s3(clients, location:str, url:str, allow_multipart:bool):
         if bkt_resp["IsTruncated"] is False:
             break
         else:
+            logging.debug(f"list_objects_v2(Bucket={bucket}, Prefix={prefix}, ContinuationToken={bkt_resp['NextContinuationToken']}")
             bkt_resp = s3.list_objects_v2(
                 Bucket=bucket, Prefix=prefix, ContinuationToken=bkt_resp["NextContinuationToken"]
             )
@@ -173,7 +175,7 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
             print(i, file=sys.stderr)
         sys.exit(1)
 
-def run(config:str, source_s3:str, dest_s3:str, allow_multipart:bool=False, storage_class:Optional[str]=None, modulus:int=1, remainder:int=0):
+def run(config:str, source_s3:str, dest_s3:str, allow_multipart:bool=False, storage_class:Optional[str]=None, modulus:int=1, remainder:int=0, loglevel:str="WARNING"):
     """
     Used to synchronise data between buckets from different AWS accounts.
     !! Do not use outside of AWS on large data, egress charges !!
@@ -213,6 +215,9 @@ def run(config:str, source_s3:str, dest_s3:str, allow_multipart:bool=False, stor
             ! Use with modulus !
             Specify a value of 0-(modulus-1) for this invocation of the script.
 
+        loglevel
+            DEBUG|INFO|WARNING|ERROR|CRITICAL
+
     Other:
 
     It is possible to use this to transfer data within an account, however be concious that it will not delete data
@@ -222,7 +227,9 @@ def run(config:str, source_s3:str, dest_s3:str, allow_multipart:bool=False, stor
         logging.error(f"Option --remainder ({remainder}) must be less than --modulus ({modulus}) (and >= 0)")
         sys.exit(1)
 
+    loglevel = loglevel.upper()
 
+    log_config(loglevel)
     clients = load_conf(config)
     src_bkt, src_prefix, src_objects = list_s3(clients, "FROM", source_s3, allow_multipart)
     transfer_objects(clients, src_bkt, src_prefix, src_objects, dest_s3, storage_class, modulus, remainder)
