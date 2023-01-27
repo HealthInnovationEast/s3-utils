@@ -88,13 +88,14 @@ def list_s3(clients, location:str, url:str, allow_multipart:bool):
         if bkt_resp["IsTruncated"] is False:
             break
         else:
-            logging.debug(f"list_objects_v2(Bucket={bucket}, Prefix={prefix}, ContinuationToken={bkt_resp['NextContinuationToken']}")
+            logging.debug(f"list_objects_v2(Bucket={bucket}, Prefix={prefix}, ContinuationToken={bkt_resp['NextContinuationToken']})")
             bkt_resp = s3.list_objects_v2(
                 Bucket=bucket, Prefix=prefix, ContinuationToken=bkt_resp["NextContinuationToken"]
             )
     return bucket, prefix, s3_set
 
 def obj_info(s3, bucket, key):
+    logging.info(f"list_objects_v2(Bucket={bucket}, Prefix={key})")
     bkt_resp = s3.list_objects_v2(Bucket=bucket, Prefix=key)
     response = None
     if bkt_resp["KeyCount"] > 0:
@@ -161,6 +162,7 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
             )
 
         start = datetime.now().timestamp()
+        logging.info(f"upload_file({bucket}, {target})")
         dest_client.upload_file(TMP_DL_FILE, bucket, target, ExtraArgs=up_extra_args, Config=trans_conf)
         end = datetime.now().timestamp()
         logging.info(f"Upload MBs/s \t {calc_transfer_speed(start, end, src_obj['ObjectSize'])} -> {bucket}/{target}")
