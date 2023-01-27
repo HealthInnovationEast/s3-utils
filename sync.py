@@ -81,6 +81,7 @@ def list_s3(clients, location:str, url:str, allow_multipart:bool):
             s3_set[f["Key"]] = {"ETag": f["ETag"], "PartSize" : part_size, "ObjectSize": attr_resp["ObjectSize"]}
 
             if len(s3_set) == 10:
+                logging.warning("Exiting file listing early due to testing")
                 break
 
         if bkt_resp["IsTruncated"] is False:
