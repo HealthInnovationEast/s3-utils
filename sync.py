@@ -57,6 +57,7 @@ def list_s3(clients, location:str, url:str, allow_multipart:bool):
     bucket, prefix = extract_bucket(url)
     s3 = clients[location]
     s3_set = {}
+    logging.info(f"list_objects_v2(Bucket={bucket}, Prefix={prefix})")
     bkt_resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
 
     while True:
@@ -88,7 +89,7 @@ def list_s3(clients, location:str, url:str, allow_multipart:bool):
         if bkt_resp["IsTruncated"] is False:
             break
         else:
-            logging.debug(f"list_objects_v2(Bucket={bucket}, Prefix={prefix}, ContinuationToken={bkt_resp['NextContinuationToken']})")
+            logging.info(f"list_objects_v2(Bucket={bucket}, Prefix={prefix}, ContinuationToken={bkt_resp['NextContinuationToken']})")
             bkt_resp = s3.list_objects_v2(
                 Bucket=bucket, Prefix=prefix, ContinuationToken=bkt_resp["NextContinuationToken"]
             )
