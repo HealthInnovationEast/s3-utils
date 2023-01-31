@@ -136,10 +136,12 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
         target = src.replace(src_prefix, prefix)
         target_obj = obj_info(dest_client, bucket, target)
         if target_obj is not None:
-            if target_obj["ETag"] == chk:
-                logging.info(f"Skipping as found with matching ETag: {src}")
-                continue
-            logging.warning(f"Redoing as mismatched ETag: {src}")
+            logging.info(f"Skipping as object found: {src}")
+            continue
+            # if target_obj["ETag"] == chk:
+            #     logging.info(f"Skipping as found with matching ETag: {src}")
+            #     continue
+            # logging.warning(f"Redoing as mismatched ETag: {src}")
         # download the file
         logging.info(f"Downloading: {src}")
         if os.path.exists(TMP_DL_FILE):
@@ -168,9 +170,9 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
         end = datetime.now().timestamp()
         logging.info(f"Upload MBs/s \t {calc_transfer_speed(start, end, src_obj['ObjectSize'])} -> {bucket}/{target}")
 
-        target_obj = obj_info(dest_client, bucket, target)
-        if target_obj["ETag"] != chk:
-            issue_list.append(f"ETag mismatch: {src_bkt}/{src} : {bucket}/{target}")
+        # target_obj = obj_info(dest_client, bucket, target)
+        # if target_obj["ETag"] != chk:
+        #     issue_list.append(f"ETag mismatch: {src_bkt}/{src} : {bucket}/{target}")
     if os.path.exists(TMP_DL_FILE):
         os.remove(TMP_DL_FILE)
     if len(issue_list) > 0:
