@@ -12,6 +12,7 @@ import math
 import sys
 import os
 from datetime import datetime
+from pprint import pprint
 
 MB = 1024*1024
 TMP_DL_FILE = '/tmp/sync_tmp_file'
@@ -53,38 +54,21 @@ def extract_bucket(s3_path:str):
     return (bucket, prefix)
 
 
-def list_s3(clients, location:str, url:str, allow_multipart:bool):
+def list_s3(clients, location:str, url:str, allow_multipart:bool, modulus:int, remainder:int):
     bucket, prefix = extract_bucket(url)
     s3 = clients[location]
     s3_set = {}
     logging.info(f"list_objects_v2(Bucket={bucket}, Prefix={prefix})")
     bkt_resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
 
-    while True:
+    s3_set = {}
+
+    run_outer = True
+    while run_outer:
         for f in bkt_resp["Contents"]:
             if f["Key"].endswith("/"): continue
 
-            attr_resp = s3.get_object_attributes(
-                Bucket=bucket,
-                Key=f["Key"],
-                ObjectAttributes=['ObjectParts','ObjectSize']
-            )
-
-            part_size = None
-            if "ObjectParts" in attr_resp:
-                # ceil then rescale back to bytes
-                part_size = math.ceil(attr_resp["ObjectSize"] / attr_resp["ObjectParts"]["TotalPartsCount"] / MB) * MB
-
-            if part_size is not None:
-                if allow_multipart == False:
-                    logging.warning(f"Multipart, skipping: {f['Key']} (see --help)")
-                    continue
-
-            s3_set[f["Key"]] = {"ETag": f["ETag"], "PartSize" : part_size, "ObjectSize": attr_resp["ObjectSize"]}
-
-            if len(s3_set) == 10:
-                logging.warning("Exiting file listing early due to testing")
-                break
+            s3_set[f["Key"]] = f["ETag"]
 
         if bkt_resp["IsTruncated"] is False:
             break
@@ -93,7 +77,37 @@ def list_s3(clients, location:str, url:str, allow_multipart:bool):
             bkt_resp = s3.list_objects_v2(
                 Bucket=bucket, Prefix=prefix, ContinuationToken=bkt_resp["NextContinuationToken"]
             )
-    return bucket, prefix, s3_set
+
+    obj_counter = 0
+    s3_cleaned = {}
+    # order to ensure modulus is consistent
+    for o_key, etag in sorted(s3_set.items()):
+        obj_counter += 1
+        if obj_counter % modulus != remainder:
+            logging.info(f"modulo skip: {obj_counter} -> {o_key}")
+            continue
+        attr_resp = s3.get_object_attributes(
+            Bucket=bucket,
+            Key=o_key,
+            ObjectAttributes=['ObjectParts','ObjectSize']
+        )
+
+        part_size = None
+        if "ObjectParts" in attr_resp:
+            # only need to set the part size if it's likely to be over the default (8MB)
+            # test for over ~1GB
+            if attr_resp["ObjectSize"] / MB > 1000:
+                # ceil then rescale back to bytes
+                part_size = math.ceil(attr_resp["ObjectSize"] / attr_resp["ObjectParts"]["TotalPartsCount"] / MB) * MB
+
+        if part_size is not None:
+            if allow_multipart == False:
+                logging.warning(f"Multipart, skipping: {f['Key']} (see --help)")
+                continue
+
+        s3_cleaned[o_key] = {"ETag": etag, "PartSize" : part_size, "ObjectSize": attr_resp["ObjectSize"]}
+
+    return bucket, prefix, s3_cleaned
 
 def obj_info(s3, bucket, key):
     logging.info(f"list_objects_v2(Bucket={bucket}, Prefix={key})")
@@ -108,7 +122,7 @@ def obj_info(s3, bucket, key):
 def calc_transfer_speed(start:float, end:float, size_bytes):
     return math.floor((size_bytes / MB) / (end-start))
 
-def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_objects:Dict[str,str], dest_url:str, storage_class: Optional[str], modulus:int, remainder:int):
+def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_objects:Dict[str,str], dest_url:str, storage_class: Optional[str]):
     issue_list = []
     bucket, prefix = extract_bucket(dest_url)
     source_client = clients["FROM"]
@@ -122,13 +136,8 @@ def transfer_objects(clients:Dict[str,Any], src_bkt:str, src_prefix:str, src_obj
         use_threads=True
     )
 
-    # want consistent order so we can use a modulus
-    obj_counter = 0
+    # be consistent in order
     for src, src_obj in sorted(src_objects.items()):
-        obj_counter += 1
-        if obj_counter % modulus != remainder:
-            logging.info(f"modulo skip: {obj_counter} -> {src}")
-            continue
         # dict content to vars
         chk = src_obj["ETag"]
         part_size = src_obj["PartSize"]
@@ -236,8 +245,8 @@ def run(config:str, source_s3:str, dest_s3:str, allow_multipart:bool=False, stor
 
     log_config(loglevel)
     clients = load_conf(config)
-    src_bkt, src_prefix, src_objects = list_s3(clients, "FROM", source_s3, allow_multipart)
-    transfer_objects(clients, src_bkt, src_prefix, src_objects, dest_s3, storage_class, modulus, remainder)
+    src_bkt, src_prefix, src_objects = list_s3(clients, "FROM", source_s3, allow_multipart, modulus, remainder)
+    transfer_objects(clients, src_bkt, src_prefix, src_objects, dest_s3, storage_class)
 
 if __name__ == '__main__':
   fire.Fire(run)
