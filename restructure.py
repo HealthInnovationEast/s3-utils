@@ -129,7 +129,7 @@ def sync_files(clients:Dict[str,Any], to_migrate:List[Dict[str,str]], write:bool
             transfer_item['is_s3'] = True
             transfer_item['src_bucket'] = bkt
             transfer_item['src_key'] = key
-            transfer_item['src_size'] = src_obj['ObjectSize']
+            transfer_item['src_size'] = src_obj['Size']
         elif os.path.isfile(source):
             ## evaluate local file and check for presence at dest
             transfer_item['src_path'] = source
@@ -143,7 +143,7 @@ def sync_files(clients:Dict[str,Any], to_migrate:List[Dict[str,str]], write:bool
         (dest_bkt, dest_key) = bucket_key_from_uri(dest)
         dest_obj = obj_info(dest_client, dest_bkt, dest_key)
         if dest_obj is not None:
-            if dest_obj['ObjectSize'] == transfer_item['src_size']:
+            if dest_obj['Size'] == transfer_item['src_size']:
                 logging.warn(f"File already transferred: {source} -> {dest}")
 
         ### Then actually do a file transfer
