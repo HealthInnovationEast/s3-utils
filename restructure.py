@@ -108,8 +108,9 @@ def obj_info(s3, bucket, key):
             "LastModified": datetime.fromisoformat(lst_resp["LastModified"]),
             "ETag": lst_resp["ETag"],
             "Size": lst_resp["ContentLength"],
-            "StorageClass": lst_resp["StorageClass"],
         }
+        if "StorageKey" in lst_resp:
+            response["StorageClass"] = lst_resp["StorageClass"]
     else:
         logging.info(f"list_objects_v2(Bucket={bucket}, Prefix={key})")
         bkt_resp = s3.list_objects_v2(Bucket=bucket, Prefix=key)
