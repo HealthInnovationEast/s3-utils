@@ -16,19 +16,21 @@ from datetime import datetime
 import subprocess
 import json
 
-MB = 1024*1024
+MB = 1024 * 1024
 S3_DEFAULT_PART = 8 * MB
 S3_MAX_PARTS = 10000
 S3_DEFAULT_MAX = S3_DEFAULT_PART * S3_MAX_PARTS
-TMP_DL_FILE = '/tmp/sync_tmp_file'
+TMP_DL_FILE = "/tmp/sync_tmp_file"
 CPUS = os.cpu_count()
 
 client_config = botocore.config.Config(
     max_pool_connections=CPUS,
 )
 
+
 def log_config(level: str):
     logging.basicConfig(level=getattr(logging, level))
+
 
 def get_client(purpose: str, account_sec):
     return boto3.client(
@@ -36,8 +38,9 @@ def get_client(purpose: str, account_sec):
         region_name=account_sec["region"],
         aws_access_key_id=account_sec["access_key"],
         aws_secret_access_key=account_sec["secret_key"],
-        config=client_config
+        config=client_config,
     )
+
 
 def load_conf(config_file: str) -> Dict[str, Any]:
     config = configparser.ConfigParser()
@@ -48,7 +51,8 @@ def load_conf(config_file: str) -> Dict[str, Any]:
         clients[s] = get_client("s3", config[s])
     return clients
 
-def extract_bucket(s3_path:str):
+
+def extract_bucket(s3_path: str):
     if s3_path.startswith("s3://") is not True:
         raise ValueError("*_S3 must include s3:// prefix")
     clean = s3_path.replace("s3://", "")
@@ -58,9 +62,12 @@ def extract_bucket(s3_path:str):
         prefix = prefix + "/"
     return (bucket, prefix)
 
-def load_restructure(from_to:str, modulus:int, remainder:int) -> List[Dict[str,str]]:
+
+def load_restructure(
+    from_to: str, modulus: int, remainder: int
+) -> List[Dict[str, str]]:
     to_migrate = []
-    with open(from_to, 'rt') as f:
+    with open(from_to, "rt") as f:
         lc = 0
         for line in f:
             lc += 1
@@ -68,14 +75,25 @@ def load_restructure(from_to:str, modulus:int, remainder:int) -> List[Dict[str,s
             if lc % modulus != remainder:
                 logging.info(f"modulo skip: {lc} -> {source}")
                 continue
-            to_migrate.append({'source': source, 'dest': dest})
+            to_migrate.append({"source": source, "dest": dest})
     return to_migrate
+
 
 def obj_info(s3, bucket, key):
     response = None
     if s3 is None:
-        cmdargs = ["aws", "s3api", "head-object", "--output", "json", "--bucket", bucket, "--key", key]
-        logging.info(' '.join(cmdargs))
+        cmdargs = [
+            "aws",
+            "s3api",
+            "head-object",
+            "--output",
+            "json",
+            "--bucket",
+            bucket,
+            "--key",
+            key,
+        ]
+        logging.info(" ".join(cmdargs))
         cmdOut = subprocess.run(cmdargs, capture_output=True)
         if cmdOut.returncode != 0:
             logging.error(f"Last command: {' '.join(cmdargs)}")
@@ -86,11 +104,11 @@ def obj_info(s3, bucket, key):
         lst_resp = json.loads(cmdOut.stdout)
         # mimic the boto3 object
         response = {
-            'Key': key,
-            'LastModified': datetime.fromisoformat(lst_resp['LastModified']),
-            'ETag': lst_resp['ETag'],
-            'Size': lst_resp['ContentLength'],
-            'StorageClass': lst_resp['StorageClass']
+            "Key": key,
+            "LastModified": datetime.fromisoformat(lst_resp["LastModified"]),
+            "ETag": lst_resp["ETag"],
+            "Size": lst_resp["ContentLength"],
+            "StorageClass": lst_resp["StorageClass"],
         }
     else:
         logging.info(f"list_objects_v2(Bucket={bucket}, Prefix={key})")
@@ -101,11 +119,13 @@ def obj_info(s3, bucket, key):
                     response = obj
     return response
 
-def bucket_key_from_uri(object_uri:str) -> List[str]:
+
+def bucket_key_from_uri(object_uri: str) -> List[str]:
     clean = object_uri.replace("s3://", "")
     (bkt, *rest) = clean.split("/")
     key = "/".join(rest)
     return bkt, key
+
 
 def transfer_conf(size):
     trans_conf = None
@@ -118,17 +138,19 @@ def transfer_conf(size):
         multipart_threshold=part_size,
         multipart_chunksize=part_size,
         max_concurrency=CPUS,
-        use_threads=True
+        use_threads=True,
     )
     return trans_conf
 
-def calc_transfer_speed(start:float, end:float, size_bytes):
-    return math.floor((size_bytes / MB) / (end-start))
+
+def calc_transfer_speed(start: float, end: float, size_bytes):
+    return math.floor((size_bytes / MB) / (end - start))
+
 
 def download_file(source_client, transfer_item, dl_t_cfg):
     bkt = transfer_item["src_bucket"]
     key = transfer_item["src_key"]
-    obj_size = transfer_item['src_size']
+    obj_size = transfer_item["src_size"]
     logging.info(f"Downloading: s3://{bkt}/{key}")
     if os.path.exists(TMP_DL_FILE):
         os.remove(TMP_DL_FILE)
@@ -136,8 +158,15 @@ def download_file(source_client, transfer_item, dl_t_cfg):
     start = datetime.now().timestamp()
 
     if source_client is None:
-        cmdargs = ["aws", "s3", "cp", "--only-show-errors", f"s3://{bkt}/{key}", TMP_DL_FILE]
-        logging.info(' '.join(cmdargs))
+        cmdargs = [
+            "aws",
+            "s3",
+            "cp",
+            "--only-show-errors",
+            f"s3://{bkt}/{key}",
+            TMP_DL_FILE,
+        ]
+        logging.info(" ".join(cmdargs))
         cmdOut = subprocess.run(cmdargs, capture_output=True)
         if cmdOut.returncode != 0:
             logging.error(f"Last command: {' '.join(cmdargs)}")
@@ -149,57 +178,67 @@ def download_file(source_client, transfer_item, dl_t_cfg):
         source_client.download_file(bkt, key, TMP_DL_FILE, Config=dl_t_cfg)
 
     end = datetime.now().timestamp()
-    logging.info(f"Download MBs/s \t {calc_transfer_speed(start, end, obj_size)} <- s3://{bkt}/{key}")
+    logging.info(
+        f"Download MBs/s \t {calc_transfer_speed(start, end, obj_size)} <- s3://{bkt}/{key}"
+    )
 
     dl_size = os.path.getsize(TMP_DL_FILE)
     if obj_size != dl_size:
-        logging.error(f"Downloaded file has different size, {obj_size} vs {dl_size}, s3://{bkt}/{key} vs {TMP_DL_FILE}")
+        logging.error(
+            f"Downloaded file has different size, {obj_size} vs {dl_size}, s3://{bkt}/{key} vs {TMP_DL_FILE}"
+        )
         sys.exit(1)
     return TMP_DL_FILE
 
-def sync_files(clients:Dict[str,Any], to_migrate:List[Dict[str,str]], write:bool=False, storage_class:str=None, from_shell:bool=False):
+
+def sync_files(
+    clients: Dict[str, Any],
+    to_migrate: List[Dict[str, str]],
+    write: bool = False,
+    storage_class: str = None,
+    from_shell: bool = False,
+):
     source_client = clients["FROM"]
     dest_client = clients["TO"]
     if from_shell is True:
         source_client = None
 
-    dl_t_cfg = boto3.s3.transfer.TransferConfig(
-        max_concurrency=CPUS,
-        use_threads=True
-    )
+    dl_t_cfg = boto3.s3.transfer.TransferConfig(max_concurrency=CPUS, use_threads=True)
 
     up_extra_args = None
     if storage_class is not None:
         up_extra_args = {"StorageClass": storage_class}
 
     for item in to_migrate:
-        source = item['source']
-        transfer_item = {'is_s3': False}
+        source = item["source"]
+        transfer_item = {"is_s3": False}
         if source.startswith("s3://"):
             ## evaluate S3 object presence, on both ends and compare
             (bkt, key) = bucket_key_from_uri(source)
             src_obj = obj_info(source_client, bkt, key)
             if src_obj is None:
-                logging.error(f"Source file not found: {source} (bkt: {bkt}, key: {key})")
+                logging.error(
+                    f"Source file not found: {source} (bkt: {bkt}, key: {key})"
+                )
                 sys.exit(1)
-            transfer_item['is_s3'] = True
-            transfer_item['src_bucket'] = bkt
-            transfer_item['src_key'] = key
-            transfer_item['src_size'] = src_obj['Size']
+            transfer_item["is_s3"] = True
+            transfer_item["src_bucket"] = bkt
+            transfer_item["src_key"] = key
+            transfer_item["src_size"] = src_obj["Size"]
         elif os.path.isfile(source):
             ## evaluate local file and check for presence at dest
-            transfer_item['src_path'] = source
-            transfer_item['src_size'] = os.path.getsize(source)
+            transfer_item["src_path"] = source
+            transfer_item["src_size"] = os.path.getsize(source)
         else:
             logging.error(f"File not locally or with s3:// prefix: {source}")
             sys.exit(1)
 
         # dest is always S3
-        dest = item['dest']
+        dest = item["dest"]
         (dest_bkt, dest_key) = bucket_key_from_uri(dest)
         dest_obj = obj_info(dest_client, dest_bkt, dest_key)
         if dest_obj is not None:
-            if dest_obj['Size'] == transfer_item['src_size']:
+            if dest_obj["Size"] == transfer_item["src_size"]:
                 logging.warning(f"File already transferred: {source} -> {dest}")
                 continue
 
@@ -209,19 +248,40 @@ def sync_files(clients:Dict[str,Any], to_migrate:List[Dict[str,str]], write:bool
             logging.info("Skipping file transfers due to: write=False")
             continue
 
-        if transfer_item['is_s3'] is True:
-            transfer_item['src_path'] = download_file(source_client, transfer_item, dl_t_cfg)
+        if transfer_item["is_s3"] is True:
+            transfer_item["src_path"] = download_file(
+                source_client, transfer_item, dl_t_cfg
+            )
 
         ### Now copy to destination
-        trans_conf = transfer_conf(transfer_item['src_size'])
+        trans_conf = transfer_conf(transfer_item["src_size"])
 
         start = datetime.now().timestamp()
         logging.info(f"upload_file({dest_bkt}, {dest_key})")
-        dest_client.upload_file(transfer_item['src_path'], dest_bkt, dest_key, ExtraArgs=up_extra_args, Config=trans_conf)
+        dest_client.upload_file(
+            transfer_item["src_path"],
+            dest_bkt,
+            dest_key,
+            ExtraArgs=up_extra_args,
+            Config=trans_conf,
+        )
         end = datetime.now().timestamp()
-        logging.info(f"Upload MBs/s \t {calc_transfer_speed(start, end, transfer_item['src_size'])} -> {dest_bkt}/{dest_key}")
+        logging.info(
+            f"Upload MBs/s \t {calc_transfer_speed(start, end, transfer_item['src_size'])} -> {dest_bkt}/{dest_key}"
+        )
 
-def run(config:str, from_to:str, shell:bool=False, write:bool=False, allow_multipart:bool=False, storage_class:Optional[str]=None, modulus:int=1, remainder:int=0, loglevel:str="WARNING"):
+
+def run(
+    config: str,
+    from_to: str,
+    shell: bool = False,
+    write: bool = False,
+    allow_multipart: bool = False,
+    storage_class: Optional[str] = None,
+    modulus: int = 1,
+    remainder: int = 0,
+    loglevel: str = "WARNING",
+):
     """
     !! Do not use outside of AWS on large data, egress/firewall charges !!
 
@@ -275,7 +335,9 @@ def run(config:str, from_to:str, shell:bool=False, write:bool=False, allow_multi
     so storage costs will apply.
     """
     if remainder < 0 or remainder >= modulus:
-        logging.error(f"Option --remainder ({remainder}) must be less than --modulus ({modulus}) (and >= 0)")
+        logging.error(
+            f"Option --remainder ({remainder}) must be less than --modulus ({modulus}) (and >= 0)"
+        )
         sys.exit(1)
 
     loglevel = loglevel.upper()
@@ -283,9 +345,11 @@ def run(config:str, from_to:str, shell:bool=False, write:bool=False, allow_multi
     log_config(loglevel)
     clients = load_conf(config)
     to_migrate = load_restructure(from_to, modulus, remainder)
-    sync_files(clients, to_migrate, write=write, storage_class=storage_class, from_shell=shell)
+    sync_files(
+        clients, to_migrate, write=write, storage_class=storage_class, from_shell=shell
+    )
     # def sync_files(clients:Dict[str,Any], to_migrate:List[Dict[str,str]], write:bool):
 
 
-if __name__ == '__main__':
-  fire.Fire(run)
+if __name__ == "__main__":
+    fire.Fire(run)
