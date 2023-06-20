@@ -9,6 +9,7 @@ Scripts used when manipulating S3 data.
 - [Scripts](#scripts)
   - [`sync.py`](#syncpy)
     - [Parallel use](#parallel-use)
+  - [`restructure.py`](#restructurepy)
 
 ## Preparation
 
@@ -34,3 +35,12 @@ See command line help for usage:
 #### Parallel use
 
 It is possible to use the script on multiple nodes of compute using the `--modulus` and `--remainder` options.
+
+### `restructure.py`
+
+Used to restructure S3 directory tree, within or between buckets.
+
+See `restructure.py -h` for arguments.
+
+`from_to` file is a csv of source and dest location.  You need to generate this file separately due to the high variability
+in requirement for this.  This script is a generic tool for performing the transfer.
