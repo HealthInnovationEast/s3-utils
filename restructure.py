@@ -100,7 +100,7 @@ def restore_object_cmd(bucket: str, key: str):
 
 def obj_info(s3, bucket: str, key: str, exists: bool = False):
     response = None
-    skip = False
+    skip_msg = None
     if s3 is None:
         cmdargs = [
             "aws",
@@ -154,15 +154,12 @@ def obj_info(s3, bucket: str, key: str, exists: bool = False):
             if "ArchiveStatus" in restore or (
                 "StorageClass" in restore and restore["StorageClass"] in RESTORE_TIERS
             ):
-                if (
-                    "Restore" in restore
-                    and restore["Restore"] != 'ongoing-request="true"'
-                ):
-                    logging.warning(f"THAWING: {bucket}/{key}")
+                if "Restore" in restore:
+                    if restore["Restore"] == 'ongoing-request="true"':
+                        skip_msg = f"THAWING: {bucket}/{key}"
                 else:
-                    logging.warning(f"FROZEN: {restore_object_cmd(bucket, key)}")
-                skip = True
-    return response, skip
+                    skip_msg = f"FROZEN: {restore_object_cmd(bucket, key)}"
+    return response, skip_msg
 
 
 def bucket_key_from_uri(object_uri: str) -> List[str]:
@@ -259,18 +256,16 @@ def sync_files(
     for item in to_migrate:
         source = item["source"]
         transfer_item = {"is_s3": False}
+        skip_msg = None
         if source.startswith("s3://"):
             ## evaluate S3 object presence, on both ends and compare
             (bkt, key) = bucket_key_from_uri(source)
-            (src_obj, skip) = obj_info(source_client, bkt, key, True)
+            (src_obj, skip_msg) = obj_info(source_client, bkt, key, True)
             if src_obj is None:
                 logging.error(
                     f"Source file not found: {source} (bkt: {bkt}, key: {key})"
                 )
                 sys.exit(1)
-            if skip is True:
-                freeze_thaw_counter += 1
-                continue
             transfer_item["is_s3"] = True
             transfer_item["src_bucket"] = bkt
             transfer_item["src_key"] = key
@@ -286,11 +281,16 @@ def sync_files(
         # dest is always S3
         dest = item["dest"]
         (dest_bkt, dest_key) = bucket_key_from_uri(dest)
-        (dest_obj, skip) = obj_info(dest_client, dest_bkt, dest_key)
+        (dest_obj, skip_ignored) = obj_info(dest_client, dest_bkt, dest_key)
         if dest_obj is not None:
             if dest_obj["Size"] == transfer_item["src_size"]:
                 logging.warning(f"File already transferred: {source} -> {dest}")
                 continue
+
+        if skip_msg is not None:
+            logging.warning(skip_msg)
+            freeze_thaw_counter += 1
+            continue
 
         ### Then actually do a file transfer
 
@@ -324,10 +324,10 @@ def sync_files(
             f"{freeze_thaw_counter} files were not transferred due to being in a frozen state"
         )
         logging.critical(
-            "Files where restore has been requested can be found in logs: grep -F THAWING"
+            "Files where restore has been requested can be found in logs: grep -F THAWING output.log"
         )
         logging.critical(
-            "Files where restore needs to be requested can be found in logs: grep -F FROZEN"
+            "Commands for restore can be found in logs: grep -F FROZEN output.log | cut -c22-"
         )
         sys.exit(2)
 
