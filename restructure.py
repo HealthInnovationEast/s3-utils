@@ -277,7 +277,6 @@ def run(
     from_to: str,
     shell: bool = False,
     write: bool = False,
-    allow_multipart: bool = False,
     storage_class: Optional[str] = None,
     modulus: int = 1,
     remainder: int = 0,
@@ -307,9 +306,6 @@ def run(
 
         write
             By default no data transfer will be performed.
-
-        allow_multipart
-            When not specified all files over 8 MB are ignored, useful for initial testing
 
         storage_class
             When supported allows you to direct files into a particular storage class to reduce costs:
