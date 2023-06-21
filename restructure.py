@@ -15,6 +15,7 @@ import math
 from datetime import datetime
 import subprocess
 import json
+from pprint import pprint
 
 MB = 1024 * 1024
 S3_DEFAULT_PART = 8 * MB
@@ -22,6 +23,7 @@ S3_MAX_PARTS = 10000
 S3_DEFAULT_MAX = S3_DEFAULT_PART * S3_MAX_PARTS
 TMP_DL_FILE = "/tmp/sync_tmp_file"
 CPUS = os.cpu_count()
+RESTORE_TIERS = ("GLACIER", "DEEP_ARCHIVE")
 
 client_config = botocore.config.Config(
     max_pool_connections=CPUS,
@@ -79,8 +81,26 @@ def load_restructure(
     return to_migrate
 
 
-def obj_info(s3, bucket, key):
+def restore_object_cmd(bucket: str, key: str):
+    cmdargs = [
+        "aws",
+        "s3api",
+        "restore-object",
+        "--output",
+        "json",
+        "--bucket",
+        bucket,
+        "--key",
+        key,
+        "--restore-request",
+        """'{"Days":15,"GlacierJobParameters":{"Tier":"Bulk"}}'""",
+    ]
+    return " ".join(cmdargs)
+
+
+def obj_info(s3, bucket: str, key: str, exists: bool = False):
     response = None
+    skip = False
     if s3 is None:
         cmdargs = [
             "aws",
@@ -109,6 +129,10 @@ def obj_info(s3, bucket, key):
             "ETag": lst_resp["ETag"],
             "Size": lst_resp["ContentLength"],
         }
+        if "ArchiveStatus" in lst_resp:
+            response["ArchiveStatus"] = lst_resp["ArchiveStatus"]
+            if "Restore" in lst_resp:
+                response["Restore"] = lst_resp["Restore"]
         if "StorageKey" in lst_resp:
             response["StorageClass"] = lst_resp["StorageClass"]
     else:
@@ -118,7 +142,27 @@ def obj_info(s3, bucket, key):
             for obj in bkt_resp["Contents"]:
                 if obj["Key"] == key:
                     response = obj
-    return response
+
+        if exists is True:
+            logging.info(f"head_object(Bucket={bucket}, Key={key})")
+            head_resp = s3.head_object(Bucket=bucket, Key=key)
+            # pprint(head_resp)
+            restore = {}
+            for i in ("StorageClass", "Restore", "ArchiveStatus"):
+                if i in head_resp:
+                    restore[i] = head_resp[i]
+            if "ArchiveStatus" in restore or (
+                "StorageClass" in restore and restore["StorageClass"] in RESTORE_TIERS
+            ):
+                if (
+                    "Restore" in restore
+                    and restore["Restore"] != 'ongoing-request="true"'
+                ):
+                    logging.warning(f"THAWING: {bucket}/{key}")
+                else:
+                    logging.warning(f"FROZEN: {restore_object_cmd(bucket, key)}")
+                skip = True
+    return response, skip
 
 
 def bucket_key_from_uri(object_uri: str) -> List[str]:
@@ -204,6 +248,8 @@ def sync_files(
     if from_shell is True:
         source_client = None
 
+    freeze_thaw_counter = 0
+
     dl_t_cfg = boto3.s3.transfer.TransferConfig(max_concurrency=CPUS, use_threads=True)
 
     up_extra_args = None
@@ -216,12 +262,15 @@ def sync_files(
         if source.startswith("s3://"):
             ## evaluate S3 object presence, on both ends and compare
             (bkt, key) = bucket_key_from_uri(source)
-            src_obj = obj_info(source_client, bkt, key)
+            (src_obj, skip) = obj_info(source_client, bkt, key, True)
             if src_obj is None:
                 logging.error(
                     f"Source file not found: {source} (bkt: {bkt}, key: {key})"
                 )
                 sys.exit(1)
+            if skip is True:
+                freeze_thaw_counter += 1
+                continue
             transfer_item["is_s3"] = True
             transfer_item["src_bucket"] = bkt
             transfer_item["src_key"] = key
@@ -237,7 +286,7 @@ def sync_files(
         # dest is always S3
         dest = item["dest"]
         (dest_bkt, dest_key) = bucket_key_from_uri(dest)
-        dest_obj = obj_info(dest_client, dest_bkt, dest_key)
+        (dest_obj, skip) = obj_info(dest_client, dest_bkt, dest_key)
         if dest_obj is not None:
             if dest_obj["Size"] == transfer_item["src_size"]:
                 logging.warning(f"File already transferred: {source} -> {dest}")
@@ -270,6 +319,17 @@ def sync_files(
         logging.info(
             f"Upload MBs/s \t {calc_transfer_speed(start, end, transfer_item['src_size'])} -> {dest_bkt}/{dest_key}"
         )
+    if freeze_thaw_counter > 0:
+        logging.critical(
+            f"{freeze_thaw_counter} files were not transferred due to being in a frozen state"
+        )
+        logging.critical(
+            "Files where restore has been requested can be found in logs: grep -F THAWING"
+        )
+        logging.critical(
+            "Files where restore needs to be requested can be found in logs: grep -F FROZEN"
+        )
+        sys.exit(2)
 
 
 def run(
@@ -325,6 +385,11 @@ def run(
 
         loglevel
             DEBUG|INFO|WARNING|ERROR|CRITICAL
+
+    Exit codes should always be consider in context of the logs:
+
+        1: Usage or expected data error
+        2: Incomplete data transfer
 
     Other:
 
