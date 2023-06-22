@@ -16,14 +16,16 @@ from datetime import datetime
 import subprocess
 import json
 from pprint import pprint
+import tempfile
 
 MB = 1024 * 1024
 S3_DEFAULT_PART = 8 * MB
 S3_MAX_PARTS = 10000
 S3_DEFAULT_MAX = S3_DEFAULT_PART * S3_MAX_PARTS
-TMP_DL_FILE = "/tmp/sync_tmp_file"
 CPUS = os.cpu_count()
 RESTORE_TIERS = ("GLACIER", "DEEP_ARCHIVE")
+RESTORE_REQ_GL = """'{"Days":15,"GlacierJobParameters":{"Tier":"Bulk"}}'"""
+RESTORE_REQ_IT = """'{"GlacierJobParameters":{"Tier":"Bulk"}}'"""
 
 client_config = botocore.config.Config(
     max_pool_connections=CPUS,
@@ -81,7 +83,10 @@ def load_restructure(
     return to_migrate
 
 
-def restore_object_cmd(bucket: str, key: str):
+def restore_object_cmd(bucket: str, key: str, intelligent_tiering: bool):
+    restore_req = RESTORE_REQ_IT
+    if intelligent_tiering is False:
+        restore_req = RESTORE_REQ_GL
     cmdargs = [
         "aws",
         "s3api",
@@ -93,7 +98,7 @@ def restore_object_cmd(bucket: str, key: str):
         "--key",
         key,
         "--restore-request",
-        """'{"Days":15,"GlacierJobParameters":{"Tier":"Bulk"}}'""",
+        restore_req,
     ]
     return " ".join(cmdargs)
 
@@ -158,7 +163,15 @@ def obj_info(s3, bucket: str, key: str, exists: bool = False):
                     if restore["Restore"] == 'ongoing-request="true"':
                         skip_msg = f"THAWING: {bucket}/{key}"
                 else:
-                    skip_msg = f"FROZEN: {restore_object_cmd(bucket, key)}"
+                    is_intelligent = False
+                    if (
+                        "StorageClass" in restore
+                        and restore["StorageClass"] == "INTELLIGENT_TIERING"
+                    ):
+                        is_intelligent = True
+                    skip_msg = (
+                        f"FROZEN: {restore_object_cmd(bucket, key, is_intelligent)}"
+                    )
     return response, skip_msg
 
 
@@ -189,13 +202,13 @@ def calc_transfer_speed(start: float, end: float, size_bytes):
     return math.floor((size_bytes / MB) / (end - start))
 
 
-def download_file(source_client, transfer_item, dl_t_cfg):
+def download_file(source_client, transfer_item, dl_t_cfg, tmp_dl_file):
     bkt = transfer_item["src_bucket"]
     key = transfer_item["src_key"]
     obj_size = transfer_item["src_size"]
     logging.info(f"Downloading: s3://{bkt}/{key}")
-    if os.path.exists(TMP_DL_FILE):
-        os.remove(TMP_DL_FILE)
+    if os.path.exists(tmp_dl_file):
+        os.remove(tmp_dl_file)
 
     start = datetime.now().timestamp()
 
@@ -206,7 +219,7 @@ def download_file(source_client, transfer_item, dl_t_cfg):
             "cp",
             "--only-show-errors",
             f"s3://{bkt}/{key}",
-            TMP_DL_FILE,
+            tmp_dl_file,
         ]
         logging.info(" ".join(cmdargs))
         cmdOut = subprocess.run(cmdargs, capture_output=True)
@@ -217,20 +230,20 @@ def download_file(source_client, transfer_item, dl_t_cfg):
             logging.error(f"Command stderr: {cmdOut.stderr}")
             sys.exit(1)
     else:
-        source_client.download_file(bkt, key, TMP_DL_FILE, Config=dl_t_cfg)
+        source_client.download_file(bkt, key, tmp_dl_file, Config=dl_t_cfg)
 
     end = datetime.now().timestamp()
     logging.info(
         f"Download MBs/s \t {calc_transfer_speed(start, end, obj_size)} <- s3://{bkt}/{key}"
     )
 
-    dl_size = os.path.getsize(TMP_DL_FILE)
+    dl_size = os.path.getsize(tmp_dl_file)
     if obj_size != dl_size:
         logging.error(
-            f"Downloaded file has different size, {obj_size} vs {dl_size}, s3://{bkt}/{key} vs {TMP_DL_FILE}"
+            f"Downloaded file has different size, {obj_size} vs {dl_size}, s3://{bkt}/{key} vs {tmp_dl_file}"
         )
         sys.exit(1)
-    return TMP_DL_FILE
+    return tmp_dl_file
 
 
 def sync_files(
@@ -253,72 +266,78 @@ def sync_files(
     if storage_class is not None:
         up_extra_args = {"StorageClass": storage_class}
 
-    for item in to_migrate:
-        source = item["source"]
-        transfer_item = {"is_s3": False}
-        skip_msg = None
-        if source.startswith("s3://"):
-            ## evaluate S3 object presence, on both ends and compare
-            (bkt, key) = bucket_key_from_uri(source)
-            (src_obj, skip_msg) = obj_info(source_client, bkt, key, True)
-            if src_obj is None:
-                logging.error(
-                    f"Source file not found: {source} (bkt: {bkt}, key: {key})"
-                )
-                sys.exit(1)
-            transfer_item["is_s3"] = True
-            transfer_item["src_bucket"] = bkt
-            transfer_item["src_key"] = key
-            transfer_item["src_size"] = src_obj["Size"]
-        elif os.path.isfile(source):
-            ## evaluate local file and check for presence at dest
-            transfer_item["src_path"] = source
-            transfer_item["src_size"] = os.path.getsize(source)
-        else:
-            logging.error(f"File not locally or with s3:// prefix: {source}")
-            sys.exit(1)
+    with tempfile.TemporaryDirectory(
+        prefix="sync_tmp", dir=tempfile.gettempdir()
+    ) as tmpdir:
+        tmp_file = os.path.join(tmpdir, "sync_file")
 
-        # dest is always S3
-        dest = item["dest"]
-        (dest_bkt, dest_key) = bucket_key_from_uri(dest)
-        (dest_obj, skip_ignored) = obj_info(dest_client, dest_bkt, dest_key)
-        if dest_obj is not None:
-            if dest_obj["Size"] == transfer_item["src_size"]:
-                logging.warning(f"File already transferred: {source} -> {dest}")
+        for item in to_migrate:
+            source = item["source"]
+            transfer_item = {"is_s3": False}
+            skip_msg = None
+            if source.startswith("s3://"):
+                ## evaluate S3 object presence, on both ends and compare
+                (bkt, key) = bucket_key_from_uri(source)
+                (src_obj, skip_msg) = obj_info(source_client, bkt, key, True)
+                if src_obj is None:
+                    logging.error(
+                        f"Source file not found: {source} (bkt: {bkt}, key: {key})"
+                    )
+                    sys.exit(1)
+                transfer_item["is_s3"] = True
+                transfer_item["src_bucket"] = bkt
+                transfer_item["src_key"] = key
+                transfer_item["src_size"] = src_obj["Size"]
+            elif os.path.isfile(source):
+                ## evaluate local file and check for presence at dest
+                transfer_item["src_path"] = source
+                transfer_item["src_size"] = os.path.getsize(source)
+            else:
+                logging.error(f"File not locally or with s3:// prefix: {source}")
+                sys.exit(1)
+
+            # dest is always S3
+            dest = item["dest"]
+            (dest_bkt, dest_key) = bucket_key_from_uri(dest)
+            (dest_obj, skip_ignored) = obj_info(dest_client, dest_bkt, dest_key)
+            if dest_obj is not None:
+                if dest_obj["Size"] == transfer_item["src_size"]:
+                    logging.warning(f"File already transferred: {source} -> {dest}")
+                    continue
+
+            if skip_msg is not None:
+                logging.warning(skip_msg)
+                freeze_thaw_counter += 1
                 continue
 
-        if skip_msg is not None:
-            logging.warning(skip_msg)
-            freeze_thaw_counter += 1
-            continue
+            ### Then actually do a file transfer
 
-        ### Then actually do a file transfer
+            if write is False:
+                logging.info("Skipping file transfers due to: write=False")
+                continue
 
-        if write is False:
-            logging.info("Skipping file transfers due to: write=False")
-            continue
+            if transfer_item["is_s3"] is True:
+                transfer_item["src_path"] = download_file(
+                    source_client, transfer_item, dl_t_cfg, tmp_file
+                )
 
-        if transfer_item["is_s3"] is True:
-            transfer_item["src_path"] = download_file(
-                source_client, transfer_item, dl_t_cfg
+            ### Now copy to destination
+            trans_conf = transfer_conf(transfer_item["src_size"])
+
+            start = datetime.now().timestamp()
+            logging.info(f"upload_file({dest_bkt}, {dest_key})")
+            dest_client.upload_file(
+                transfer_item["src_path"],
+                dest_bkt,
+                dest_key,
+                ExtraArgs=up_extra_args,
+                Config=trans_conf,
+            )
+            end = datetime.now().timestamp()
+            logging.info(
+                f"Upload MBs/s \t {calc_transfer_speed(start, end, transfer_item['src_size'])} -> {dest_bkt}/{dest_key}"
             )
 
-        ### Now copy to destination
-        trans_conf = transfer_conf(transfer_item["src_size"])
-
-        start = datetime.now().timestamp()
-        logging.info(f"upload_file({dest_bkt}, {dest_key})")
-        dest_client.upload_file(
-            transfer_item["src_path"],
-            dest_bkt,
-            dest_key,
-            ExtraArgs=up_extra_args,
-            Config=trans_conf,
-        )
-        end = datetime.now().timestamp()
-        logging.info(
-            f"Upload MBs/s \t {calc_transfer_speed(start, end, transfer_item['src_size'])} -> {dest_bkt}/{dest_key}"
-        )
     if freeze_thaw_counter > 0:
         logging.critical(
             f"{freeze_thaw_counter} files were not transferred due to being in a frozen state"
