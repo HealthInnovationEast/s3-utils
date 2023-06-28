@@ -15,8 +15,8 @@ import math
 from datetime import datetime
 import subprocess
 import json
-from pprint import pprint
 import tempfile
+import hashlib
 
 MB = 1024 * 1024
 S3_DEFAULT_PART = 8 * MB
@@ -33,7 +33,7 @@ client_config = botocore.config.Config(
 
 
 def log_config(level: str):
-    logging.basicConfig(level=getattr(logging, level))
+    logging.basicConfig(level=getattr(logging, level.upper()))
 
 
 def get_client(purpose: str, account_sec):
@@ -54,17 +54,6 @@ def load_conf(config_file: str) -> Dict[str, Any]:
     for s in config.sections():
         clients[s] = get_client("s3", config[s])
     return clients
-
-
-def extract_bucket(s3_path: str):
-    if s3_path.startswith("s3://") is not True:
-        raise ValueError("*_S3 must include s3:// prefix")
-    clean = s3_path.replace("s3://", "")
-    (bucket, *rest) = clean.split("/")
-    prefix = "/".join(rest)
-    if prefix.endswith("/") is False:
-        prefix = prefix + "/"
-    return (bucket, prefix)
 
 
 def load_restructure(
@@ -151,7 +140,6 @@ def obj_info(s3, bucket: str, key: str, exists: bool = False):
         if exists is True:
             logging.info(f"head_object(Bucket={bucket}, Key={key})")
             head_resp = s3.head_object(Bucket=bucket, Key=key)
-            # pprint(head_resp)
             restore = {}
             for i in ("StorageClass", "Restore", "ArchiveStatus"):
                 if i in head_resp:
@@ -246,12 +234,21 @@ def download_file(source_client, transfer_item, dl_t_cfg, tmp_dl_file):
     return tmp_dl_file
 
 
+def md5_file(to_md5):
+    hash_md5 = hashlib.md5()
+    with open(to_md5, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            hash_md5.update(chunk)
+    return hash_md5.hexdigest()
+
+
 def sync_files(
     clients: Dict[str, Any],
     to_migrate: List[Dict[str, str]],
     write: bool = False,
     storage_class: str = None,
     from_shell: bool = False,
+    chksum: bool = False,
 ):
     source_client = clients["FROM"]
     dest_client = clients["TO"]
@@ -321,6 +318,10 @@ def sync_files(
                     source_client, transfer_item, dl_t_cfg, tmp_file
                 )
 
+            if chksum is True and dest_key.endswith(".md5") is False:
+                hash_md5 = md5_file(tmp_file)
+                logging.warning(f"META: {dest_bkt}/{dest_key},{hash_md5}")
+
             ### Now copy to destination
             trans_conf = transfer_conf(transfer_item["src_size"])
 
@@ -360,6 +361,7 @@ def run(
     modulus: int = 1,
     remainder: int = 0,
     loglevel: str = "WARNING",
+    chksum: bool = False,
 ):
     """
     !! Do not use outside of AWS on large data, egress/firewall charges !!
@@ -391,6 +393,9 @@ def run(
             STANDARD | REDUCED_REDUNDANCY | STANDARD_IA | ONEZONE_IA | INTELLIGENT_TIERING | GLACIER |
             DEEP_ARCHIVE | GLACIER_IR. Defaults to 'STANDARD' or bucket policy.
 
+        chksum
+            Include a log line with destination filename and md5, prefixed META.
+
         modulus
             ! Use with remainder !
             Allows you to split workload for frozen source bucket into even sized chunks for parallel processing
@@ -415,19 +420,23 @@ def run(
     It is possible to use this to transfer data within an account, however be concious that it will not delete data
     so storage costs will apply.
     """
+    log_config(loglevel)
+
     if remainder < 0 or remainder >= modulus:
         logging.error(
             f"Option --remainder ({remainder}) must be less than --modulus ({modulus}) (and >= 0)"
         )
         sys.exit(1)
 
-    loglevel = loglevel.upper()
-
-    log_config(loglevel)
     clients = load_conf(config)
     to_migrate = load_restructure(from_to, modulus, remainder)
     sync_files(
-        clients, to_migrate, write=write, storage_class=storage_class, from_shell=shell
+        clients,
+        to_migrate,
+        write=write,
+        storage_class=storage_class,
+        from_shell=shell,
+        chksum=chksum,
     )
     # def sync_files(clients:Dict[str,Any], to_migrate:List[Dict[str,str]], write:bool):
 
